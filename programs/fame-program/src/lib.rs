@@ -11,29 +11,21 @@ use anchor_spl::token::{
 };
 use raydium_contract_instructions::amm_instruction;
 
-declare_id!("6dHqbP7BTmvpyLaqfriXRz7Z6MC8PrkTFNu146hNUzBs");
+declare_id!("7A7yZo9stXdpm7YPkboo3QV6dCYB2ge6CWGauQ7rmJS5");
 
-// pub const START_TIMESTAMP: i64 = 1712476800;
-// pub const END_TIMESTAMP: i64 = START_TIMESTAMP + 86400 * 2;
-// pub const FINAL_REFUND_TIMESTAMP: i64 = END_TIMESTAMP + 86400;
-// pub const LP_OPEN_TIME_DELAY: u64 = 3600;
-// pub const MIN_FUNDS_THRESHOLD: u64 = 4000 * LAMPORTS_PER_SOL;
-// pub const MAX_FUNDS_CAP: u64 = 5000 * LAMPORTS_PER_SOL;
-// pub const MIN_FUNDS_PER_USER: u64 = LAMPORTS_PER_SOL / 10;
-
-pub const START_TIMESTAMP: i64 = 1712556000;
-pub const END_TIMESTAMP: i64 = START_TIMESTAMP + 30 * 60;
+pub const START_TIMESTAMP: i64 = 1713967200;
+pub const END_TIMESTAMP: i64 = START_TIMESTAMP + 86400;
 pub const FINAL_REFUND_TIMESTAMP: i64 = END_TIMESTAMP + 86400;
 pub const LP_OPEN_TIME_DELAY: u64 = 3600;
-pub const MIN_FUNDS_THRESHOLD: u64 = 20 * LAMPORTS_PER_SOL;
-pub const MAX_FUNDS_CAP: u64 = 25 * LAMPORTS_PER_SOL;
+pub const MIN_FUNDS_THRESHOLD: u64 = 4000 * LAMPORTS_PER_SOL;
+pub const MAX_FUNDS_CAP: u64 = 5000 * LAMPORTS_PER_SOL;
 pub const MIN_FUNDS_PER_USER: u64 = LAMPORTS_PER_SOL / 10;
 
 // token details
-pub const NAME: &str = "Fair Meme";
+pub const NAME: &str = "FAME";
 pub const SYMBOL: &str = "FAME";
 pub const METADATA_URI: &str =
-    "https://ipfs.io/ipfs/QmWGCS8ZeYVcjF6NhtycNBXHnCntBXWTXHMDW4xYMMHZfu";
+    "https://ipfs.io/ipfs/QmVUiQnCwUTfHspErVJxM6Ng7WrGVzSQgRPtC1XRT1G4Av";
 pub const DECIMALS: u8 = 6;
 pub const TOKEN_TOTAL_SUPPLY: u64 = 10u64.pow(9) * 10u64.pow(DECIMALS as u32);
 
@@ -49,7 +41,7 @@ fn multiply_and_divide(a: u64, b: u64, c: u64) -> u64 {
             return result_u64;
         }
     }
-    // If conversion or calculation overflows, return u64's maximum value
+    // If conversion or calculation overflows, return u64's MIN value
     u64::MIN
 }
 #[program]
@@ -70,14 +62,13 @@ mod fame {
                     to: vault.to_account_info(),
                 },
             ),
-            3 * LAMPORTS_PER_SOL,
+            2 * LAMPORTS_PER_SOL,
         )?;
         fame_status.current_funding_amount = 0;
         fame_status.max_funding_amount = 0;
         fame_status.funding_user_count = 0;
         fame_status.refunding_user_count = 0;
         fame_status.assigned_token_user_count = 0;
-        fame_status.yield_to_hardcap_count = 0;
         fame_status.token_created = false;
         fame_status.lp_created = false;
         Ok(())
@@ -85,6 +76,7 @@ mod fame {
 
     pub fn buy(ctx: Context<Buy>, amount: u64) -> Result<()> {
         let slot = Clock::get()?.unix_timestamp;
+        msg!("current slot: {}", slot);
         require!(slot > START_TIMESTAMP, FameError::NotStartedYet);
         require!(slot < END_TIMESTAMP, FameError::HasEnded);
         require!(
@@ -119,7 +111,6 @@ mod fame {
 
             current_share.owner = signer.key();
             current_share.share_amount = 0;
-            current_share.has_yield_to_hardcap = false;
             current_share.has_refunded = false;
             current_share.has_assigned_token = false;
         }
@@ -129,73 +120,13 @@ mod fame {
         Ok(())
     }
 
-    pub fn yield_to_hardcap(ctx: Context<Refund>) -> Result<()> {
+    pub fn create_token(ctx: Context<CreateToken>) -> Result<()> {
         let slot = Clock::get()?.unix_timestamp;
         require!(slot > END_TIMESTAMP, FameError::NotEndedYet);
         let fame_status = &mut ctx.accounts.fame_status;
         require!(
             fame_status.max_funding_amount >= MIN_FUNDS_THRESHOLD,
             FameError::NotReachedMinFundsThreshold
-        );
-        let share = &mut ctx.accounts.share;
-        let destination = &mut ctx.accounts.destination;
-
-        require_eq!(share.owner, destination.key(), FameError::NotOwner);
-        require!(
-            !share.has_yield_to_hardcap,
-            FameError::AlreadyYieldToHardcap
-        );
-        share.share_amount = multiply_and_divide(
-            TOKEN_TOTAL_SUPPLY / 2,
-            share.funding_amount,
-            fame_status.max_funding_amount,
-        );
-
-        if fame_status.max_funding_amount > MAX_FUNDS_CAP {
-            let yielded_funding_amount = multiply_and_divide(
-                MAX_FUNDS_CAP,
-                share.funding_amount,
-                fame_status.max_funding_amount,
-            );
-
-            let refund_amount = share.funding_amount - yielded_funding_amount;
-
-            let vault = &mut ctx.accounts.vault;
-            let system_program = &ctx.accounts.system_program;
-
-            let bump = &[ctx.bumps.vault];
-            let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
-            let signer_seeds = &[&seeds[..]];
-
-            let vault_balance_before = vault.get_lamports();
-
-            transfer(
-                CpiContext::new(
-                    system_program.to_account_info(),
-                    Transfer {
-                        from: vault.to_account_info(),
-                        to: destination.to_account_info(),
-                    },
-                )
-                .with_signer(signer_seeds),
-                refund_amount,
-            )?;
-            let vault_balance_after = vault.get_lamports();
-            require_eq!(vault_balance_after, vault_balance_before - refund_amount);
-
-            share.funding_amount = yielded_funding_amount;
-            fame_status.current_funding_amount -= refund_amount;
-        }
-        share.has_yield_to_hardcap = true;
-        fame_status.yield_to_hardcap_count += 1;
-        Ok(())
-    }
-
-    pub fn create_token(ctx: Context<CreateToken>) -> Result<()> {
-        let fame_status = &mut ctx.accounts.fame_status;
-        require!(
-            fame_status.yield_to_hardcap_count == fame_status.funding_user_count,
-            FameError::NotYieldToHardcapForAllUsers
         );
         require!(!fame_status.token_created, FameError::AlreadyCreatedToken);
 
@@ -276,6 +207,48 @@ mod fame {
         let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
 
+        share.share_amount = multiply_and_divide(
+            TOKEN_TOTAL_SUPPLY / 2,
+            share.funding_amount,
+            fame_status.max_funding_amount,
+        );
+
+        if fame_status.max_funding_amount > MAX_FUNDS_CAP {
+            let yielded_funding_amount = multiply_and_divide(
+                MAX_FUNDS_CAP,
+                share.funding_amount,
+                fame_status.max_funding_amount,
+            );
+
+            let refund_amount = share.funding_amount - yielded_funding_amount;
+
+            let vault = &mut ctx.accounts.vault;
+            let system_program = &ctx.accounts.system_program;
+
+            let bump = &[ctx.bumps.vault];
+            let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
+            let signer_seeds = &[&seeds[..]];
+
+            let vault_balance_before = vault.get_lamports();
+
+            transfer(
+                CpiContext::new(
+                    system_program.to_account_info(),
+                    Transfer {
+                        from: vault.to_account_info(),
+                        to: destination.to_account_info(),
+                    },
+                )
+                .with_signer(signer_seeds),
+                refund_amount,
+            )?;
+            let vault_balance_after = vault.get_lamports();
+            require_eq!(vault_balance_after, vault_balance_before - refund_amount);
+
+            share.funding_amount = yielded_funding_amount;
+            fame_status.current_funding_amount -= refund_amount;
+        }
+
         spl_tranfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -350,16 +323,18 @@ mod fame {
 
     pub fn initialize_lp(ctx: Context<InitializeLp>, nonce: u8) -> Result<()> {
         let fame_status = &mut ctx.accounts.fame_status;
-        require!(
-            fame_status.yield_to_hardcap_count == fame_status.funding_user_count,
-            FameError::NotYieldToHardcapForAllUsers
-        );
         require!(fame_status.token_created, FameError::TokenNotCreatedYet);
         require!(!fame_status.lp_created, FameError::AlreadyCreatedLp);
 
         let bump = &[ctx.bumps.vault];
         let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
+
+        let wsol_amount = if fame_status.current_funding_amount > MAX_FUNDS_CAP {
+            MAX_FUNDS_CAP
+        } else {
+            fame_status.current_funding_amount
+        };
 
         msg!("Running wrap sol to wsol");
         transfer(
@@ -371,7 +346,7 @@ mod fame {
                 },
                 signer_seeds,
             ),
-            fame_status.current_funding_amount,
+            wsol_amount,
         )?;
 
         // Sync the native token to reflect the new SOL balance as wSOL
@@ -385,7 +360,7 @@ mod fame {
 
         let opentime = Clock::get()?.unix_timestamp as u64 + LP_OPEN_TIME_DELAY;
         let coin_amount: u64 = TOKEN_TOTAL_SUPPLY / 2;
-        let pc_amount: u64 = fame_status.current_funding_amount;
+        let pc_amount: u64 = wsol_amount;
 
         msg!("Running raydium amm initialize2");
         let initialize_ix = amm_instruction::initialize2(
@@ -442,6 +417,7 @@ mod fame {
         invoke_signed(&initialize_ix, &account_infos, signer_seeds)?;
 
         fame_status.lp_created = true;
+        fame_status.current_funding_amount -= wsol_amount;
         Ok(())
     }
 
@@ -476,7 +452,7 @@ pub struct Initialize<'info> {
     #[account(mut, seeds = [b"vault".as_ref()], bump)]
     pub vault: SystemAccount<'info>,
 
-    #[account(init, seeds = [b"fame_status".as_ref()], bump, payer = signer, space = 8 + 34)]
+    #[account(init, seeds = [b"fame_status".as_ref()], bump, payer = signer, space = 8 + 30)]
     pub fame_status: Account<'info, FameStatus>,
 
     #[account(mut)]
@@ -737,7 +713,6 @@ pub struct FameStatus {
     funding_user_count: u32,
     refunding_user_count: u32,
     assigned_token_user_count: u32,
-    yield_to_hardcap_count: u32,
     token_created: bool,
     lp_created: bool,
 }
@@ -746,7 +721,6 @@ pub struct Share {
     owner: Pubkey,
     funding_amount: u64,
     share_amount: u64,
-    has_yield_to_hardcap: bool,
     has_refunded: bool,
     has_assigned_token: bool,
 }
@@ -771,10 +745,6 @@ pub enum FameError {
     ReachedMinFundsThreshold,
     #[msg("Not Reached Min Funds Threshold")]
     NotReachedMinFundsThreshold,
-    #[msg("Already Yield To Hardcap")]
-    AlreadyYieldToHardcap,
-    #[msg("Not Yield To Hardcap For All Users")]
-    NotYieldToHardcapForAllUsers,
     #[msg("Already Created Token")]
     AlreadyCreatedToken,
     #[msg("Token Not Created Yet")]
