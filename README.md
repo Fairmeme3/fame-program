@@ -4,6 +4,6 @@ FAME Protocol is a fair launch protocol built on Solana, designed to offer a tra
 
 This repo contains the FAME Protocol core contracts.
 
-LICENSE:
+LICENSE: GPLv3
 
 X(Twitter): [@Fame_Protocol](https://twitter.com/Fame_Protocol)

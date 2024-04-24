@@ -6,12 +6,13 @@ use anchor_spl::associated_token::{get_associated_token_address, AssociatedToken
 use anchor_spl::metadata::mpl_token_metadata::types::DataV2;
 use anchor_spl::metadata::{create_metadata_accounts_v3, CreateMetadataAccountsV3, Metadata};
 use anchor_spl::token::{
-    burn, mint_to, sync_native, transfer as spl_tranfer, Burn, Mint, MintTo, SyncNative, Token,
-    TokenAccount, Transfer as SplTransfer,
+    burn, mint_to, set_authority, sync_native, transfer as spl_tranfer, Burn, Mint, MintTo,
+    SetAuthority, SyncNative, Token, TokenAccount, Transfer as SplTransfer,
 };
+use anchor_spl::token::spl_token::instruction::AuthorityType;
 use raydium_contract_instructions::amm_instruction;
 
-declare_id!("7A7yZo9stXdpm7YPkboo3QV6dCYB2ge6CWGauQ7rmJS5");
+declare_id!("9Q22HtqtJCBevZxuwch3FZVRHYKFkLbmbAs5rwU6MqAC");
 
 pub const START_TIMESTAMP: i64 = 1713967200;
 pub const END_TIMESTAMP: i64 = START_TIMESTAMP + 86400;
@@ -174,6 +175,18 @@ mod fame {
             },
             true,
             true,
+            None,
+        )?;
+        set_authority(
+            CpiContext::new_with_signer(
+                ctx.accounts.metadata_program.to_account_info(),
+                SetAuthority {
+                    account_or_mint: ctx.accounts.mint.to_account_info(),
+                    current_authority: ctx.accounts.mint.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            AuthorityType::MintTokens,
             None,
         )?;
         fame_status.token_created = true;
