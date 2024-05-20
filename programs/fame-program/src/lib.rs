@@ -5,30 +5,30 @@ use anchor_lang::system_program::{transfer, Transfer};
 use anchor_spl::associated_token::{get_associated_token_address, AssociatedToken};
 use anchor_spl::metadata::mpl_token_metadata::types::DataV2;
 use anchor_spl::metadata::{create_metadata_accounts_v3, CreateMetadataAccountsV3, Metadata};
+use anchor_spl::token::spl_token::instruction::AuthorityType;
 use anchor_spl::token::{
     burn, mint_to, set_authority, sync_native, transfer as spl_tranfer, Burn, Mint, MintTo,
     SetAuthority, SyncNative, Token, TokenAccount, Transfer as SplTransfer,
 };
-use anchor_spl::token::spl_token::instruction::AuthorityType;
 use raydium_contract_instructions::amm_instruction;
+use solana_program::pubkey;
 
-declare_id!("9Q22HtqtJCBevZxuwch3FZVRHYKFkLbmbAs5rwU6MqAC");
+pub const DEFAULT_LP_OPEN_TIME_DELAY: u64 = 3600;
+pub const DEFAULT_FINAL_REFUND_DELAY: i64 = 3600 * 24;
+pub const DEFAULT_MIN_FUNDS_PER_USER: u64 = LAMPORTS_PER_SOL / 10;
+pub const DEFAULT_MAX_FUNDS_PER_USER: u64 = LAMPORTS_PER_SOL * 10;
+pub const INIT_COST: u64 = 2 * LAMPORTS_PER_SOL / 100;
 
-pub const START_TIMESTAMP: i64 = 1713967200;
-pub const END_TIMESTAMP: i64 = START_TIMESTAMP + 86400;
-pub const FINAL_REFUND_TIMESTAMP: i64 = END_TIMESTAMP + 86400;
-pub const LP_OPEN_TIME_DELAY: u64 = 3600;
-pub const MIN_FUNDS_THRESHOLD: u64 = 4000 * LAMPORTS_PER_SOL;
-pub const MAX_FUNDS_CAP: u64 = 5000 * LAMPORTS_PER_SOL;
-pub const MIN_FUNDS_PER_USER: u64 = LAMPORTS_PER_SOL / 10;
+pub const MIN_FUNDS_THRESHOLD: u64 = 100 * LAMPORTS_PER_SOL;
+pub const MAX_FUNDS_THRESHOLD: u64 = 1000000 * LAMPORTS_PER_SOL;
 
-// token details
-pub const NAME: &str = "FAME";
-pub const SYMBOL: &str = "FAME";
-pub const METADATA_URI: &str =
-    "https://ipfs.io/ipfs/QmVUiQnCwUTfHspErVJxM6Ng7WrGVzSQgRPtC1XRT1G4Av";
-pub const DECIMALS: u8 = 6;
-pub const TOKEN_TOTAL_SUPPLY: u64 = 10u64.pow(9) * 10u64.pow(DECIMALS as u32);
+pub const MIN_PROTOCOL_FEE: u64 = 33 * LAMPORTS_PER_SOL / 10;
+pub const LP_FEE: u64 = 5 * LAMPORTS_PER_SOL / 10;
+pub const FAME_VAULT: Pubkey = pubkey!("7apbWmrFuxQvoC2bqMCK7C2UbfohKAU8LX9JKwNm5gR");
+
+pub const TOKEN_DECIMALS: u8 = 6;
+pub const TOKEN_TOTAL_SUPPLY: u64 = 10u64.pow(9) * 10u64.pow(TOKEN_DECIMALS as u32);
+declare_id!("BxydrxKLHNsBakkndFZXjrQhVBanHwvFAMsv4ov2XxCj");
 
 fn multiply_and_divide(a: u64, b: u64, c: u64) -> u64 {
     // Try converting to u128
@@ -49,11 +49,38 @@ fn multiply_and_divide(a: u64, b: u64, c: u64) -> u64 {
 mod fame {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        token_metadata_uri: String,
+        token_name: String,
+        token_symbol: String,
+        duration: i64,
+        min_funds_threshold: u64,
+        max_funds_cap: u64,
+    ) -> Result<()> {
+        let start_timestamp = Clock::get()?.unix_timestamp;
         let vault = &mut ctx.accounts.vault;
         let fame_status = &mut ctx.accounts.fame_status;
+        let fund_raising = &mut ctx.accounts.fund_raising;
         let signer = &mut ctx.accounts.signer;
         let system_program = &ctx.accounts.system_program;
+
+        require!(
+            min_funds_threshold >= MIN_FUNDS_THRESHOLD && max_funds_cap <= MAX_FUNDS_THRESHOLD,
+            FameError::FundsThresholdInvalid
+        );
+        require!(
+            max_funds_cap >= min_funds_threshold,
+            FameError::FundsCapInvalid
+        );
+        require!(
+            token_name.len() <= 10 && token_symbol.len() <= 10,
+            FameError::TokenNameInvalid
+        );
+        require!(
+            duration >= 3600 && duration <= 3600 * 72,
+            FameError::DurationInvalid
+        );
 
         transfer(
             CpiContext::new(
@@ -63,8 +90,9 @@ mod fame {
                     to: vault.to_account_info(),
                 },
             ),
-            2 * LAMPORTS_PER_SOL,
+            INIT_COST,
         )?;
+        fame_status.fund_raising = fund_raising.key();
         fame_status.current_funding_amount = 0;
         fame_status.max_funding_amount = 0;
         fame_status.funding_user_count = 0;
@@ -72,17 +100,43 @@ mod fame {
         fame_status.assigned_token_user_count = 0;
         fame_status.token_created = false;
         fame_status.lp_created = false;
+
+        fund_raising.creator = signer.key();
+        fund_raising.token_name = token_name;
+        fund_raising.token_symbol = token_symbol;
+        fund_raising.token_metadata_uri = token_metadata_uri;
+        fund_raising.token_decimal = TOKEN_DECIMALS;
+        fund_raising.token_total_supply = TOKEN_TOTAL_SUPPLY;
+        fund_raising.start_timestamp = start_timestamp;
+        fund_raising.end_timestamp = start_timestamp + duration;
+        fund_raising.final_refund_timestamp =
+            start_timestamp + duration + DEFAULT_FINAL_REFUND_DELAY;
+        fund_raising.lp_open_time_delay = DEFAULT_LP_OPEN_TIME_DELAY;
+        fund_raising.min_funds_threshold = min_funds_threshold;
+        fund_raising.max_funds_cap = max_funds_cap;
+        fund_raising.min_funds_per_user = DEFAULT_MIN_FUNDS_PER_USER;
+        fund_raising.max_funds_per_user = DEFAULT_MAX_FUNDS_PER_USER;
         Ok(())
     }
 
     pub fn buy(ctx: Context<Buy>, amount: u64) -> Result<()> {
         let slot = Clock::get()?.unix_timestamp;
+        let fund_raising = &mut ctx.accounts.fund_raising;
         msg!("current slot: {}", slot);
-        require!(slot > START_TIMESTAMP, FameError::NotStartedYet);
-        require!(slot < END_TIMESTAMP, FameError::HasEnded);
         require!(
-            amount >= MIN_FUNDS_PER_USER,
+            slot > fund_raising.start_timestamp,
+            FameError::NotStartedYet
+        );
+        require!(slot < fund_raising.end_timestamp, FameError::HasEnded);
+        require!(
+            amount >= fund_raising.min_funds_per_user,
             FameError::LessThanMinFundsPerUser
+        );
+
+        let current_share = &mut ctx.accounts.share;
+        require!(
+            amount + current_share.funding_amount <= fund_raising.max_funds_per_user,
+            FameError::MoreThanMaxFundsPerUser,
         );
 
         let vault = &mut ctx.accounts.vault;
@@ -106,7 +160,6 @@ mod fame {
 
         require_eq!(vault_balance_after, vault_balance_before + amount);
 
-        let current_share = &mut ctx.accounts.share;
         if current_share.funding_amount == 0 {
             fame_status.funding_user_count += 1;
 
@@ -123,17 +176,47 @@ mod fame {
 
     pub fn create_token(ctx: Context<CreateToken>) -> Result<()> {
         let slot = Clock::get()?.unix_timestamp;
-        require!(slot > END_TIMESTAMP, FameError::NotEndedYet);
+        let fund_raising = &mut ctx.accounts.fund_raising;
+        require!(slot > fund_raising.end_timestamp, FameError::NotEndedYet);
         let fame_status = &mut ctx.accounts.fame_status;
         require!(
-            fame_status.max_funding_amount >= MIN_FUNDS_THRESHOLD,
+            fame_status.max_funding_amount >= fund_raising.min_funds_threshold,
             FameError::NotReachedMinFundsThreshold
         );
+        let fame_vault: &mut AccountInfo = &mut ctx.accounts.fame_vault;
         require!(!fame_status.token_created, FameError::AlreadyCreatedToken);
+        require_eq!(fame_vault.key(), FAME_VAULT, FameError::NotFameVault);
+
+        let vault = &mut ctx.accounts.vault;
+        let system_program = &ctx.accounts.system_program;
+        let fund_raising_key = fund_raising.key();
+
+        let vault_bump = &[ctx.bumps.vault];
+        let vault_seeds: &[&[u8]] = &[b"vault".as_ref(), fund_raising_key.as_ref(), vault_bump];
+        let vault_signer_seeds = &[&vault_seeds[..]];
+
+        let protocol_fee = if fame_status.max_funding_amount * 8 / 1000 > MIN_PROTOCOL_FEE {
+            fame_status.max_funding_amount * 8 / 1000
+        } else {
+            MIN_PROTOCOL_FEE
+        };
+
+        transfer(
+            CpiContext::new_with_signer(
+                system_program.to_account_info(),
+                Transfer {
+                    from: vault.to_account_info(),
+                    to: fame_vault.to_account_info(),
+                },
+                vault_signer_seeds,
+            ),
+            protocol_fee,
+        )?;
+        fame_status.current_funding_amount -= protocol_fee;
 
         msg!("Running mint_to");
         let bump = &[ctx.bumps.mint];
-        let seeds: &[&[u8]] = &[b"mint".as_ref(), bump];
+        let seeds: &[&[u8]] = &[b"mint".as_ref(), fund_raising_key.as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
 
         mint_to(
@@ -146,7 +229,7 @@ mod fame {
                 },
                 signer_seeds,
             ),
-            TOKEN_TOTAL_SUPPLY,
+            fund_raising.token_total_supply,
         )?;
 
         msg!("Run create metadata accounts v3");
@@ -165,9 +248,9 @@ mod fame {
                 signer_seeds,
             ),
             DataV2 {
-                name: String::from(NAME),
-                symbol: String::from(SYMBOL),
-                uri: String::from(METADATA_URI),
+                name: String::from(&fund_raising.token_name),
+                symbol: String::from(&fund_raising.token_symbol),
+                uri: String::from(&fund_raising.token_metadata_uri),
                 seller_fee_basis_points: 0,
                 creators: None,
                 collection: None,
@@ -206,8 +289,15 @@ mod fame {
             ctx.accounts.to_associated_token.key(),
             FameError::IncorrectTokenVault
         );
-        let (expected_share, _bump_seed) =
-            Pubkey::find_program_address(&[destination.key().as_ref()], &ctx.program_id);
+        let fund_raising = &mut ctx.accounts.fund_raising;
+        let (expected_share, _bump_seed) = Pubkey::find_program_address(
+            &[
+                b"share".as_ref(),
+                fund_raising.key().as_ref(),
+                destination.key().as_ref(),
+            ],
+            &ctx.program_id,
+        );
 
         require_eq!(share.owner, destination.key(), FameError::NotOwner);
         require_eq!(
@@ -216,30 +306,40 @@ mod fame {
             FameError::IncorrectTokenVault
         );
 
+        let fund_raising_key = fund_raising.key();
         let bump = &[ctx.bumps.vault];
-        let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
+        let seeds: &[&[u8]] = &[b"vault".as_ref(), fund_raising_key.as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
 
         share.share_amount = multiply_and_divide(
-            TOKEN_TOTAL_SUPPLY / 2,
+            fund_raising.token_total_supply / 2,
             share.funding_amount,
             fame_status.max_funding_amount,
         );
+        let protocol_fee = if fame_status.max_funding_amount * 8 / 1000 > MIN_PROTOCOL_FEE {
+            fame_status.max_funding_amount * 8 / 1000
+        } else {
+            MIN_PROTOCOL_FEE
+        };
 
-        if fame_status.max_funding_amount > MAX_FUNDS_CAP {
-            let yielded_funding_amount = multiply_and_divide(
-                MAX_FUNDS_CAP,
+        let real_max_funding_amount = fame_status.max_funding_amount - protocol_fee - LP_FEE;
+
+        if real_max_funding_amount > fund_raising.max_funds_cap {
+            let refund_amount = multiply_and_divide(
+                real_max_funding_amount - fund_raising.max_funds_cap,
                 share.funding_amount,
                 fame_status.max_funding_amount,
             );
 
-            let refund_amount = share.funding_amount - yielded_funding_amount;
+            let yielded_funding_amount = share.funding_amount - refund_amount;
 
             let vault = &mut ctx.accounts.vault;
             let system_program = &ctx.accounts.system_program;
 
+            let fund_raising = &mut ctx.accounts.fund_raising;
+            let fund_raising_key = fund_raising.key();
             let bump = &[ctx.bumps.vault];
-            let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
+            let seeds: &[&[u8]] = &[b"vault".as_ref(), fund_raising_key.as_ref(), bump];
             let signer_seeds = &[&seeds[..]];
 
             let vault_balance_before = vault.get_lamports();
@@ -281,7 +381,8 @@ mod fame {
 
     pub fn refund(ctx: Context<Refund>) -> Result<()> {
         let slot = Clock::get()?.unix_timestamp;
-        require!(slot > END_TIMESTAMP, FameError::NotEndedYet);
+        let fund_raising = &mut ctx.accounts.fund_raising;
+        require!(slot > fund_raising.end_timestamp, FameError::NotEndedYet);
         let current_share = &mut ctx.accounts.share;
         require!(
             !current_share.has_refunded && current_share.funding_amount > 0,
@@ -291,17 +392,18 @@ mod fame {
         let vault = &mut ctx.accounts.vault;
         let fame_status = &mut ctx.accounts.fame_status;
         require!(
-            fame_status.max_funding_amount < MIN_FUNDS_THRESHOLD
-                || (slot > FINAL_REFUND_TIMESTAMP && !fame_status.lp_created),
+            fame_status.max_funding_amount < fund_raising.min_funds_threshold
+                || (slot > fund_raising.final_refund_timestamp && !fame_status.lp_created),
             FameError::ReachedMinFundsThreshold
         );
         let destination = &mut ctx.accounts.destination;
         require_eq!(current_share.owner, destination.key(), FameError::NotOwner);
 
         let system_program = &ctx.accounts.system_program;
-
+        let fund_raising = &mut ctx.accounts.fund_raising;
+        let fund_raising_key = fund_raising.key();
         let bump = &[ctx.bumps.vault];
-        let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
+        let seeds: &[&[u8]] = &[b"vault".as_ref(), fund_raising_key.as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
 
         let vault_balance_before = vault.get_lamports();
@@ -338,15 +440,24 @@ mod fame {
         let fame_status = &mut ctx.accounts.fame_status;
         require!(fame_status.token_created, FameError::TokenNotCreatedYet);
         require!(!fame_status.lp_created, FameError::AlreadyCreatedLp);
+        let fund_raising = &mut ctx.accounts.fund_raising;
+        let fund_raising_key = fund_raising.key();
 
         let bump = &[ctx.bumps.vault];
-        let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
+        let seeds: &[&[u8]] = &[b"vault".as_ref(), fund_raising_key.as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
 
-        let wsol_amount = if fame_status.current_funding_amount > MAX_FUNDS_CAP {
-            MAX_FUNDS_CAP
+        let protocol_fee = if fame_status.max_funding_amount * 8 / 1000 > MIN_PROTOCOL_FEE {
+            fame_status.max_funding_amount * 8 / 1000
         } else {
-            fame_status.current_funding_amount
+            MIN_PROTOCOL_FEE
+        };
+        let real_max_funding_amount = fame_status.max_funding_amount - protocol_fee - LP_FEE;
+
+        let wsol_amount = if real_max_funding_amount > fund_raising.max_funds_cap {
+            fund_raising.max_funds_cap
+        } else {
+            real_max_funding_amount
         };
 
         msg!("Running wrap sol to wsol");
@@ -371,8 +482,8 @@ mod fame {
             signer_seeds,
         ))?;
 
-        let opentime = Clock::get()?.unix_timestamp as u64 + LP_OPEN_TIME_DELAY;
-        let coin_amount: u64 = TOKEN_TOTAL_SUPPLY / 2;
+        let opentime = Clock::get()?.unix_timestamp as u64 + fund_raising.lp_open_time_delay;
+        let coin_amount: u64 = fund_raising.token_total_supply / 2;
         let pc_amount: u64 = wsol_amount;
 
         msg!("Running raydium amm initialize2");
@@ -440,9 +551,11 @@ mod fame {
             ctx.accounts.fame_status.lp_created,
             FameError::LpNotCreatedYet
         );
+        let fund_raising = &mut ctx.accounts.fund_raising;
+        let fund_raising_key = fund_raising.key();
 
         let bump = &[ctx.bumps.vault];
-        let seeds: &[&[u8]] = &[b"vault".as_ref(), bump];
+        let seeds: &[&[u8]] = &[b"vault".as_ref(), fund_raising_key.as_ref(), bump];
         let signer_seeds = &[&seeds[..]];
         burn(
             CpiContext::new_with_signer(
@@ -461,11 +574,15 @@ mod fame {
 }
 
 #[derive(Accounts)]
+#[instruction(token_metadata_uri: String)]
 pub struct Initialize<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(init, seeds = [b"fund_raising".as_ref(), signer.key().as_ref(), &anchor_lang::solana_program::hash::hash(token_metadata_uri.as_bytes()).to_bytes()], bump, payer = signer, space = 256)]
+    pub fund_raising: Account<'info, FundRaising>,
+
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
 
-    #[account(init, seeds = [b"fame_status".as_ref()], bump, payer = signer, space = 8 + 30)]
+    #[account(init, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump, payer = signer, space = 8 + 34 + 32)]
     pub fame_status: Account<'info, FameStatus>,
 
     #[account(mut)]
@@ -475,13 +592,16 @@ pub struct Initialize<'info> {
 
 #[derive(Accounts)]
 pub struct Buy<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(mut)]
+    pub fund_raising: Account<'info, FundRaising>,
+
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
 
-    #[account(mut, seeds = [b"fame_status".as_ref()], bump)]
+    #[account(mut, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump)]
     pub fame_status: Account<'info, FameStatus>,
 
-    #[account(init_if_needed, payer = signer, seeds = [signer.key().as_ref()], bump, space = 8 + 24 + 32)]
+    #[account(init_if_needed, payer = signer, seeds = [b"share".as_ref(), fund_raising.key().as_ref(), signer.key().as_ref()], bump, space = 8 + 24 + 32 + 32)]
     pub share: Account<'info, Share>,
     #[account(mut)]
     pub signer: Signer<'info>,
@@ -490,13 +610,16 @@ pub struct Buy<'info> {
 
 #[derive(Accounts)]
 pub struct Refund<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(mut)]
+    pub fund_raising: Account<'info, FundRaising>,
+
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
 
-    #[account(mut, seeds = [b"fame_status".as_ref()], bump)]
+    #[account(mut, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump)]
     pub fame_status: Account<'info, FameStatus>,
 
-    #[account(mut, seeds = [destination.key().as_ref()], bump)]
+    #[account(mut, seeds = [b"share".as_ref(), fund_raising.key().as_ref(), destination.key().as_ref()], bump)]
     pub share: Account<'info, Share>,
     /// CHECK: Safe
     #[account(mut)]
@@ -504,12 +627,15 @@ pub struct Refund<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[derive(Accounts)]
+#[derive(Accounts, Clone)]
 pub struct CreateToken<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(mut)]
+    pub fund_raising: Account<'info, FundRaising>,
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
-    #[account(mut, seeds = [b"fame_status".as_ref()], bump)]
+    #[account(mut, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump)]
     pub fame_status: Account<'info, FameStatus>,
+
     #[account(mut)]
     pub signer: Signer<'info>,
     /// CHECK: Safe
@@ -517,10 +643,10 @@ pub struct CreateToken<'info> {
     pub metadata: UncheckedAccount<'info>,
     #[account(
         init_if_needed,
-        seeds = [b"mint".as_ref()],
+        seeds = [b"mint".as_ref(), fund_raising.key().as_ref()],
         bump,
         payer = signer,
-        mint::decimals = DECIMALS,
+        mint::decimals = fund_raising.token_decimal,
         mint::authority = mint,
     )]
     pub mint: Account<'info, Mint>,
@@ -534,15 +660,20 @@ pub struct CreateToken<'info> {
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
     pub rent: Sysvar<'info, Rent>,
+    /// CHECK: Safe
+    #[account(mut)]
+    pub fame_vault: AccountInfo<'info>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub metadata_program: Program<'info, Metadata>,
 }
 
 #[derive(Accounts)]
 pub struct AssignToken<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(mut)]
+    pub fund_raising: Account<'info, FundRaising>,
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
-    #[account(mut, seeds = [b"fame_status".as_ref()], bump)]
+    #[account(mut, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump)]
     pub fame_status: Account<'info, FameStatus>,
     #[account(mut)]
     pub signer: Signer<'info>,
@@ -555,7 +686,7 @@ pub struct AssignToken<'info> {
     pub share: Account<'info, Share>,
     #[account(init_if_needed, payer = signer, associated_token::mint = mint, associated_token::authority = destination)]
     pub to_associated_token: Account<'info, TokenAccount>,
-    #[account(mut, seeds = [b"mint".as_ref()], bump,)]
+    #[account(mut, seeds = [b"mint".as_ref(), fund_raising.key().as_ref()], bump,)]
     pub mint: Account<'info, Mint>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -563,11 +694,13 @@ pub struct AssignToken<'info> {
 }
 #[derive(Accounts)]
 pub struct BurnLpToken<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(mut)]
+    pub fund_raising: Account<'info, FundRaising>,
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
     #[account(mut)]
     pub user_lp_token_account: Account<'info, TokenAccount>,
-    #[account(mut, seeds = [b"fame_status".as_ref()], bump)]
+    #[account(mut, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump)]
     pub fame_status: Account<'info, FameStatus>,
     /// CHECK: Safe
     pub serum_market: AccountInfo<'info>,
@@ -589,10 +722,12 @@ pub struct BurnLpToken<'info> {
 }
 #[derive(Accounts)]
 pub struct InitializeLp<'info> {
-    #[account(mut, seeds = [b"vault".as_ref()], bump)]
+    #[account(mut)]
+    pub fund_raising: Box<Account<'info, FundRaising>>,
+    #[account(mut, seeds = [b"vault".as_ref(), fund_raising.key().as_ref()], bump)]
     pub vault: SystemAccount<'info>,
-    #[account(mut, seeds = [b"fame_status".as_ref()], bump)]
-    pub fame_status: Account<'info, FameStatus>,
+    #[account(mut, seeds = [b"fame_status".as_ref(), fund_raising.key().as_ref()], bump)]
+    pub fame_status: Box<Account<'info, FameStatus>>,
     /// CHECK: Safe
     pub amm_program: AccountInfo<'info>,
     /// CHECK: Safe
@@ -720,7 +855,27 @@ pub struct InitializeLp<'info> {
 }
 
 #[account]
+pub struct FundRaising {
+    creator: Pubkey,
+    token_name: String,
+    token_symbol: String,
+    token_metadata_uri: String,
+    token_decimal: u8,
+    token_total_supply: u64,
+
+    start_timestamp: i64,
+    end_timestamp: i64,
+    final_refund_timestamp: i64,
+    lp_open_time_delay: u64,
+    min_funds_threshold: u64,
+    max_funds_cap: u64,
+    min_funds_per_user: u64,
+    max_funds_per_user: u64,
+}
+
+#[account]
 pub struct FameStatus {
+    fund_raising: Pubkey,
     current_funding_amount: u64,
     max_funding_amount: u64,
     funding_user_count: u32,
@@ -731,6 +886,7 @@ pub struct FameStatus {
 }
 #[account]
 pub struct Share {
+    fund_raising: Pubkey,
     owner: Pubkey,
     funding_amount: u64,
     share_amount: u64,
@@ -750,6 +906,8 @@ pub enum FameError {
     NotOwner,
     #[msg("Less Than Min Funds Per User")]
     LessThanMinFundsPerUser,
+    #[msg("More Than Max Funds Per User")]
+    MoreThanMaxFundsPerUser,
     #[msg("Already refunded")]
     AlreadyRefunded,
     #[msg("Missing holders")]
@@ -772,4 +930,14 @@ pub enum FameError {
     AssociatedTokenAddressMismatch,
     #[msg("Incorrect Token Vault")]
     IncorrectTokenVault,
+    #[msg("Not Fame Vault")]
+    NotFameVault,
+    #[msg("Token Name Invalid")]
+    TokenNameInvalid,
+    #[msg("Duration Invalid")]
+    DurationInvalid,
+    #[msg("Funds Cap Invalid")]
+    FundsCapInvalid,
+    #[msg("Funds Threshold Invalid")]
+    FundsThresholdInvalid,
 }
